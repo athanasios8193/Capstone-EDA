@@ -1,0 +1,228 @@
+---
+title: "Data Science Capstone Milestone Report"
+author: "Athanasios Stamatoukos"
+date: "September 16, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(quanteda)
+library(readtext)
+library(knitr)
+library(ngram)
+library(ggplot2)
+```
+
+## Introduction
+
+The John's Hopkins Data Science Specialization asks the student to analyze data from blog posts, news articles, and Twitter users in order to make a text prediction model similar to SwiftKey. The data provided included English, German, Russian, and Finnish. For the purposes of this analysis and project, I will only use the English data.
+
+```{r 'reading-in-data', echo=FALSE, cache=TRUE, warning=FALSE}
+con <- file('./Data/final/en_US/en_US.blogs.txt')
+blogs <- readLines(con)
+close(con)
+con <- file('./Data/final/en_US/en_US.news.txt')
+news <- readLines(con)
+close(con)
+con <- file('./Data/final/en_US/en_US.twitter.txt')
+twitter <- readLines(con)
+close(con)
+rm(con)
+```
+
+## Preliminary Analysis of the Data
+
+The first step in creating a text prediction algorithm is to see what the text actually contains. I loaded the data and did a very high level analysis of the data. The table below shows that there are ~900,000 entries from blogs, ~77,000 from news articles, and over 2 million from Twitter! Among the three sources of text, there are rougly 70 million total words. (Note that this may not be accurate because I treated every time there was a space in the text as a separate word.) Blogs and news snippets, on average, have more words in them than Twitter, which makes sense because I am guessing when this data was collected Twitter still had a 140 character limit (it has since been raised to 280) so it was not possible to create long posts. With 70 million words or word-like features to work with, we're sure to come up with something good.
+
+```{r 'quantifying-texts', echo=FALSE, cache=TRUE, results='asis'}
+lengths <- c(length(blogs), length(news), length(twitter))
+blogcount <- sapply(blogs, wordcount)
+newscount <- sapply(news, wordcount)
+twitcount <- sapply(twitter, wordcount)
+words <- c(sum(blogcount), sum(newscount), sum(twitcount))
+avg_words <- c(mean(blogcount), mean(newscount), mean(twitcount))
+max_words <- c(max(blogcount), max(newscount), max(twitcount))
+overall <- data.frame(source=c('blogs', 'news', 'twitter'),
+                      entries = lengths,
+                      total_words = words,
+                      average_words = avg_words,
+                      max_words = max_words)
+kable(overall, format='markdown')
+```
+
+## Sampling the Data
+
+I decided to sample the data because having 3.5 million posts is overkill and would make the computer run very slowly. I chose to randomly take 50,000 entries from the blogs dataset, 20,000 from the news dataset, and 100,000 entries from the Twitter dataset. The decision to make the news dataset so large relative to the number of entries was hard because I didn't want the news data to get 'lost,' but when making a Natural Language predictor, you'd want the set to more resemble how people actually talk which is why the blogs and Twitter have such higher representation in my sampled dataset. News articles tend to have more sophisticated language, depending on the source, but an analysis of news articles vs Twitter posts would likely show that Twitter is a better representation of causal speak which is what something like SwiftKey would strive for since it is used on phones and most of what is done on phones is texting, social media, or other similar things rather than writing news articles.
+
+```{r 'sample-texts', echo=FALSE, cache=TRUE}
+set.seed(538)
+blogsample <- sample(blogs, 50000)
+set.seed(538)
+newssample <- sample(news, 20000)
+set.seed(538)
+twittersample <- sample(twitter, 100000)
+```
+
+
+```{r 'create-corpus', echo=FALSE, cache=TRUE}
+corpus <- corpus(c(blogsample, newssample, twittersample))
+```
+
+## Creating A Corpus
+
+The next step in text analysis is to make a corpus. I spent a lot of time at first playing around with R's 'tm' package, but it was a bit unwieldly for me and I had a lot of trouble getting it to work the way I wanted. Further research on the Coursera forums and online pointed me to the 'quanteda' package which is a lot more user friendly in my opinion and also a lot faster too which never a bad thing.
+
+When I randomly sampled the data as described above, I saved the results of each source to '.txt' files so I could reuse them in different contexts and for reproducibility's sake.
+
+## Cleaning the Corpus
+
+An important step in creating predictive algorithms is to clean the text of unnecessary information which could skew the model or make it not work properly. In this case, I am removing punctuation, numbers, twitter symbols, hyphens, and foul language listen in http://www.bannedwordlist.com/lists/swearWords.txt. In addition to removing all of these things, I am converting all text to lower-case because R interprets 'dog' and 'Dog' as two separate words which would bloat the data and make it harder to work with and understand.
+
+I made a very important decision to NOT remove 'stop words,' or words that appear most frequently and to NOT stem the documents because this is a prediction algorithm so you absolutely want parts of speech and frequent words to appear. If this would have been a project to do something like sentiment analysis, it would be very appropriate to take the steps to remove these common words, but it is inappropriate in this context.
+
+```{r 'cleaning-corpus', echo=FALSE, cache=TRUE}
+url <- 'http://www.bannedwordlist.com/lists/swearWords.txt'
+cuss <- readLines(url, warn=FALSE)
+mytokens <- tokens(corpus, remove_punct=TRUE,
+                   remove_numbers=TRUE,
+                   remove_twitter=TRUE,
+                   remove_hyphens=TRUE)
+mytokens <- tokens_tolower(mytokens, keep_acronyms=FALSE)
+mytokens <- tokens_remove(mytokens, cuss, padding=TRUE)
+```
+
+## Creating N-grams and Document Feature Matrices
+
+Once the corpus is all cleaned up, the next step is to make n-grams. I decided to make 1,2,3, and 4-grams for this project. This is made very easy using 'quanteda.' Once the n-grams are made, they are used to create Document Feature Matrices for each of the 4 categories of n-grams.  These matrices are very large and contain every instance of every combination of 1, 2, 3, or 4 words that appear in the text. After creating the DFMs, I decided to get rid of any n-gram that appeared fewer than 2 times. If a term appeared only once, it could probably be an unimportant word or a typo, neither of which we want.
+
+```{r 'create-ngrams', echo=FALSE, cache=TRUE}
+mytokens1 <- tokens_ngrams(mytokens, n=1)
+mytokens2 <- tokens_ngrams(mytokens, n=2)
+mytokens3 <- tokens_ngrams(mytokens, n=3)
+mytokens4 <- tokens_ngrams(mytokens, n=4)
+```
+
+```{r 'create-dfm', echo=FALSE, cache=TRUE}
+mydfm1 <- dfm(mytokens1)
+mydfm2 <- dfm(mytokens2)
+mydfm3 <- dfm(mytokens3)
+mydfm4 <- dfm(mytokens4)
+```
+
+```{r 'trim-dfm', echo=FALSE, cache=TRUE}
+mydfm1 <- dfm_trim(mydfm1, 2)
+mydfm2 <- dfm_trim(mydfm2, 2)
+mydfm3 <- dfm_trim(mydfm3, 2)
+mydfm4 <- dfm_trim(mydfm4, 2)
+```
+
+## Interpreting the N-grams and DFMs
+
+Once the n-grams and DFMs were created, I summed up each instance separately and stored the data for further analysis.  I made a plot of the top-20 n-grams for n=1, 2, 3, and 4.
+
+```{r 'sum-dfm', echo=FALSE, cache=TRUE}
+sum1 <- colSums(mydfm1)
+sum2 <- colSums(mydfm2)
+sum3 <- colSums(mydfm3)
+sum4 <- colSums(mydfm4)
+sum1 <- sort(sum1, decreasing = TRUE)
+sum2 <- sort(sum2, decreasing = TRUE)
+sum3 <- sort(sum3, decreasing = TRUE)
+sum4 <- sort(sum4, decreasing = TRUE)
+```
+
+In the unigram case, the results are very much expected. These are 20 of the most common words in the English language, so of course they should appear most frequently.
+
+```{r 'one-gram plot', echo=FALSE}
+df1 <- data.frame(ngram=head(names(sum1),20), count=head(sum1, 20))
+g1 <- ggplot(df1, aes(reorder(ngram, -count), count)) + geom_bar(stat='identity', fill='darksalmon')
+g1 <- g1+ggtitle('Unigram Top 20 Terms')
+g1 <- g1+xlab('Unigram')
+g1 <- g1+ylab('Unigram Frequency')
+g1
+```
+
+The bigrams tell a similar story. Most of these bigrams are combinations of the words that appear in the unigram graph or use the more common verbs such as 'be' and 'have.'
+
+```{r 'two-gram plot', echo=FALSE}
+df2 <- data.frame(ngram=head(names(sum2),20), count=head(sum2, 20))
+g2 <- ggplot(df2, aes(reorder(ngram, -count), count)) + geom_bar(stat='identity', fill='skyblue')
+g2 <- g2+ggtitle('Bigram Top 20 Terms')
+g2 <- g2+xlab('Bigram')
+g2 <- g2+ylab('Bigram Frequency')
+g2 <- g2+theme(axis.text.x = element_text(angle=90))
+g2
+```
+
+Again, the trigrams are what you would probably expect. However look at the 11th item on the graph. That appears to be a typo or a mistake made when removing punctuation marks. It's supposed to say "I don't," but the cleaning process made a real mess of it.
+
+```{r 'three-gram plot', echo=FALSE}
+df3 <- data.frame(ngram=head(names(sum3),20), count=head(sum3, 20))
+g3 <- ggplot(df3, aes(reorder(ngram, -count), count)) + geom_bar(stat='identity', fill='navy')
+g3 <- g3+ggtitle('Trigram Top 20 Terms')
+g3 <- g3+xlab('Trigram')
+g3 <- g3+ylab('Trigram Frequency')
+g3 <- g3+theme(axis.text.x = element_text(angle=90))
+g3
+```
+
+The quad-grams give some interesting results. You can really see Twitter's influence here, as "thanks for the follow," "thanks for the," and "thanks for the rt(retweet)," all appear. Once again we see the issue involving the word "don't." This makes even less sense because there is an instance of the word "can't" in this same graph so I seriously don't know what's going on.
+
+```{r 'four-gram plot', echo=FALSE}
+df4 <- data.frame(ngram=head(names(sum4),20), count=head(sum4, 20))
+g4 <- ggplot(df4, aes(reorder(ngram, -count), count)) + geom_bar(stat='identity', fill='darkred')
+g4 <- g4+ggtitle('Quad-gram Top 20 Terms')
+g4 <- g4+xlab('Quad-gram')
+g4 <- g4+ylab('Quad-gram Frequency')
+g4 <- g4+theme(axis.text.x = element_text(angle=90))
+g4
+```
+
+## Language Coverage
+
+Next I'm going to look at how many terms from each n-gram set it takes to reach specific thresholds, such as 50% or 90% of the total number of n-grams observed. The graph below shows that in the unigram case, 50% and 90% are reached fairly quickly where it takes much longer in the other n-gram cases. In all four graphs, there is a very steep increase at the beginning, but once you get farther out, it becomes more linear which makes sense because the most frequent terms show up at the beginning and in the case of the tri- and quad-grams especially, there are probably many more rare terms.
+
+```{r 'language-coverage', echo=FALSE, cache=TRUE}
+df1 <- data.frame(ngram=names(sum1), count=sum1)
+df2 <- data.frame(ngram=names(sum2), count=sum2)
+df3 <- data.frame(ngram=names(sum3), count=sum3)
+df4 <- data.frame(ngram=names(sum4), count=sum4)
+df1$total <- cumsum(df1$count)/sum(df1$count)
+df2$total <- cumsum(df2$count)/sum(df2$count)
+df3$total <- cumsum(df3$count)/sum(df3$count)
+df4$total <- cumsum(df4$count)/sum(df4$count)
+df1$index <- 1:nrow(df1); df2$index <- 1:nrow(df2); df3$index <- 1:nrow(df3); df4$index <- 1:nrow(df4)
+par(mfrow=c(2,2))
+with(df1[1:20000,], plot(total, type='l', lwd=3, main='Unigram Coverage', ylab='Coverage'))
+abline(h=0.5, lwd=2, col='blue')
+abline(h=0.9, lwd=2, col='blue')
+abline(v=max(which(df1$total<0.5)), lwd=2, col='red')
+abline(v=max(which(df1$total<0.9)), lwd=2, col='red')
+with(df2[1:250000,], plot(total, type='l', lwd=3, main='Bigram Coverage', ylab='Coverage'))
+abline(h=0.5, lwd=2, col='blue')
+abline(h=0.9, lwd=2, col='blue')
+abline(v=max(which(df2$total<0.5)), lwd=2, col='red')
+abline(v=max(which(df2$total<0.9)), lwd=2, col='red')
+with(df3[1:250000,], plot(total, type='l', lwd=3, main='Trigram Coverage', ylab='Coverage'))
+abline(h=0.5, lwd=2, col='blue')
+abline(h=0.9, lwd=2, col='blue')
+abline(v=max(which(df3$total<0.5)), lwd=2, col='red')
+abline(v=max(which(df3$total<0.9)), lwd=2, col='red')
+with(df4[1:100000,], plot(total, type='l', lwd=3, main='Quad-gram Coverage', ylab='Coverage'))
+abline(h=0.5, lwd=2, col='blue')
+abline(h=0.9, lwd=2, col='blue')
+abline(v=max(which(df4$total<0.5)), lwd=2, col='red')
+abline(v=max(which(df4$total<0.9)), lwd=2, col='red')
+```
+
+## Next Steps - Prediction Model
+
+I have spent a lot of time thinking about what to do next with this project. My initial plan to make a prediction model is something I have already attempted. I would take the DFMs and then create data tables where one column was an 'n-1-gram,' the second column was the nth term in the n-gram, and the third and final column was the frequency which that n-gram appears. I'd do this for n=2, 3, and 4. The unigram case would just be two columns with the word and the frequency. My idea was to write a function where you type in a sentence and it would take the last three words in that sentence and compare then to the quad-gram table and find matches. It'd return the top 3 matches since that's what text predictors like SwiftKey on phones return. If it didn't find any matches, it would check the last two words and look up the trigram table. If that didn't return, it would go to the bigram table and then the unigram table if necessary. This is basically a "Back-off" model. It doesn't seem that sophisticated though and it doesn't really account for terms that are "out of language."
+
+There is a lot more work I can do to try and figure out other kinds of models and there is a lot of time left before the project is due so I hope to submit an acceptable end product.
+
+## Appendix
+
+I am hosting the .Rmd file for this document on github for reproducibility's sake. I belive it is important to see how I achieved my results and would not mind if you borrowed a method I used as long as you think it is helpful. The link is: 
